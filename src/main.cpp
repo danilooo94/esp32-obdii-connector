@@ -1,14 +1,14 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
-// Set to 1 to output fake data without connecting to OBD (for dashboard testing)
+// Set to 1 to emit fake data without connecting to OBD (for dashboard testing)
 #define SIMULATE_OBD 0
 
 #if !SIMULATE_OBD
 #include <BLEClientSerial.h>
 #include <ELMduino.h>
 
-// Change to match your BLE OBD adapter name (check with nRF Connect app)
+// Change to match your BLE OBD adapter name (use nRF Connect app to check)
 // Common names: "OBDII", "OBD2", "V-LINK", "OBDLink CX", "VEEPEAK"
 #define OBD_DEVICE_NAME "OBDII"
 
@@ -19,13 +19,15 @@ enum OBDState { READ_COOLANT, READ_OIL, READ_INTAKE, READ_FUEL, READ_BATTERY };
 OBDState obdState = READ_COOLANT;
 #endif
 
+// Sensor values — updated by the PID state machine, sent together as one JSON line
 float coolantTemp    = 0;
 float oilTemp        = 0;
 float intakeTemp     = 0;
 float fuelLevel      = 0;
 float batteryVoltage = 0;
 
-void sendJson() {
+void sendJson()
+{
     StaticJsonDocument<160> doc;
     doc["coolant_temp"] = coolantTemp;
     doc["oil_temp"]     = oilTemp;
@@ -36,73 +38,95 @@ void sendJson() {
     Serial.println();
 }
 
-// --- Simulation mode ---
+// =============================================================================
+// SIMULATION MODE
+// =============================================================================
 #if SIMULATE_OBD
 
-static float simCoolant  = 20.0;
-static float simOil      = 18.0;
-static float simFuel     = 72.0;
-static float simBattery  = 12.6;
+static float simCoolant = 20.0f;
+static float simOil     = 18.0f;
+static float simFuel    = 72.0f;
 
-void simulateTick() {
-    // Gradually warm up engine, simulate small random drift
-    if (simCoolant < 90.0) simCoolant += 0.3;
-    if (simOil     < 95.0) simOil     += 0.2;
-    simBattery = 12.4 + (random(0, 40) / 100.0);
-
-    coolantTemp    = simCoolant;
-    oilTemp        = simOil;
-    intakeTemp     = 28.0 + (random(-20, 20) / 10.0);
-    fuelLevel      = simFuel;
-    batteryVoltage = simBattery;
-}
-
-void setup() {
+void setup()
+{
     Serial.begin(115200);
     delay(1000);
     Serial.println("{\"status\":\"simulating\"}");
 }
 
-void loop() {
-    simulateTick();
+void loop()
+{
+    if (simCoolant < 90.0f) simCoolant += 0.3f;
+    if (simOil     < 95.0f) simOil     += 0.2f;
+
+    coolantTemp    = simCoolant;
+    oilTemp        = simOil;
+    intakeTemp     = 28.0f + (random(-20, 20) / 10.0f);
+    fuelLevel      = simFuel;
+    batteryVoltage = 12.4f + (random(0, 40) / 100.0f);
+
     sendJson();
     delay(500);
 }
 
-// --- Real OBD mode ---
+// =============================================================================
+// REAL OBD MODE
+// =============================================================================
 #else
 
-void connectToOBD() {
-    Serial.println("{\"status\":\"connecting\"}");
-    BLESerial.begin(OBD_DEVICE_NAME);
-    while (!BLESerial.connected()) {
-        delay(500);
+// Scans for the BLE adapter, connects, and initialises ELMduino.
+// Returns true on success, false if the adapter was not found or refused to connect.
+bool connectToOBD()
+{
+    Serial.println("{\"status\":\"scanning\"}");
+
+    if (!BLESerial.begin(OBD_DEVICE_NAME))
+    {
+        Serial.println("{\"status\":\"not_found\"}");
+        return false;
     }
-    Serial.println("{\"status\":\"connected\"}");
+
+    Serial.println("{\"status\":\"connecting\"}");
+
+    if (!BLESerial.connect())
+    {
+        Serial.println("{\"status\":\"connect_failed\"}");
+        return false;
+    }
+
     myELM327.begin(BLESerial, false, 2000);
     obdState = READ_COOLANT;
+
+    Serial.println("{\"status\":\"connected\"}");
+    return true;
 }
 
-void setup() {
+void setup()
+{
     Serial.begin(115200);
     delay(1000);
-    connectToOBD();
+
+    while (!connectToOBD())
+        delay(3000);
 }
 
-void loop() {
-    if (!BLESerial.connected()) {
+void loop()
+{
+    if (!BLESerial.connected())
+    {
         Serial.println("{\"status\":\"disconnected\"}");
         delay(2000);
-        connectToOBD();
+        while (!connectToOBD())
+            delay(3000);
         return;
     }
 
-    switch (obdState) {
+    switch (obdState)
+    {
         case READ_COOLANT: {
             float val = myELM327.engineCoolantTemp();
             if (myELM327.nb_rx_state != ELM_GETTING_MSG) {
-                if (myELM327.nb_rx_state == ELM_SUCCESS)
-                    coolantTemp = val;
+                if (myELM327.nb_rx_state == ELM_SUCCESS) coolantTemp = val;
                 obdState = READ_OIL;
             }
             break;
@@ -110,8 +134,7 @@ void loop() {
         case READ_OIL: {
             float val = myELM327.oilTemp();
             if (myELM327.nb_rx_state != ELM_GETTING_MSG) {
-                if (myELM327.nb_rx_state == ELM_SUCCESS)
-                    oilTemp = val;
+                if (myELM327.nb_rx_state == ELM_SUCCESS) oilTemp = val;
                 obdState = READ_INTAKE;
             }
             break;
@@ -119,8 +142,7 @@ void loop() {
         case READ_INTAKE: {
             float val = myELM327.intakeAirTemp();
             if (myELM327.nb_rx_state != ELM_GETTING_MSG) {
-                if (myELM327.nb_rx_state == ELM_SUCCESS)
-                    intakeTemp = val;
+                if (myELM327.nb_rx_state == ELM_SUCCESS) intakeTemp = val;
                 obdState = READ_FUEL;
             }
             break;
@@ -128,8 +150,7 @@ void loop() {
         case READ_FUEL: {
             float val = myELM327.fuelLevel();
             if (myELM327.nb_rx_state != ELM_GETTING_MSG) {
-                if (myELM327.nb_rx_state == ELM_SUCCESS)
-                    fuelLevel = val;
+                if (myELM327.nb_rx_state == ELM_SUCCESS) fuelLevel = val;
                 obdState = READ_BATTERY;
             }
             break;
@@ -137,8 +158,7 @@ void loop() {
         case READ_BATTERY: {
             float val = myELM327.batteryVoltage();
             if (myELM327.nb_rx_state != ELM_GETTING_MSG) {
-                if (myELM327.nb_rx_state == ELM_SUCCESS)
-                    batteryVoltage = val;
+                if (myELM327.nb_rx_state == ELM_SUCCESS) batteryVoltage = val;
                 sendJson();
                 obdState = READ_COOLANT;
             }
